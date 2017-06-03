@@ -1,6 +1,7 @@
 import sark
 import idaapi
 import idc
+import time
 
 
 def is_instruction_changing(insn, register):
@@ -44,8 +45,11 @@ def apply_register_rename(blocks, terminating_addrs, register_name, new_name, fr
 
 
 class TracePath(object):
-    def __init__(self):
+    def __init__(self, nodes=None):
         self._nodes = []
+        if nodes is not None:
+            self._nodes += nodes
+
         self._terminating_addr = None
 
     def set_terminating_addr(self, addr):
@@ -56,6 +60,15 @@ class TracePath(object):
 
     def get_nodes(self):
         return self._nodes
+
+    def __repr__(self):
+        representation = "Path[len = {}]".format(len(self.nodes))
+        for block in self.nodes:
+            representation += " -> {}".format(block)
+        return representation
+
+    def __str__(self):
+        return self.__repr__()
 
     nodes = property(get_nodes)
     terminating_addr = property(get_terminating_addr, set_terminating_addr)
@@ -110,7 +123,7 @@ def get_traces_imp(block, register, blocks_viewed=None, addr=None):
             blocks_viewed += more_blocks
         current_paths = new_paths
 
-    return (current_paths, blocks_viewed)
+    return current_paths, blocks_viewed
 
 
 def get_traces(block, register, addr=None):
@@ -119,8 +132,55 @@ def get_traces(block, register, addr=None):
     return (blocks, terminating_addrs)
 
 
+def increment_path(path, viewed_blocks):
+    last_block = path.nodes[-1]
+    resulting_paths = []
+
+    for block in last_block.next:
+        if block in viewed_blocks:
+            continue
+
+        viewed_blocks.append(block)
+        new_path = TracePath(path.nodes)
+        new_path.nodes.append(block)
+        resulting_paths.append(new_path)
+
+    return resulting_paths
+
+
+def get_traces_fast(block, register, addr=None):
+    current_paths = []
+    initial_path = TracePath()
+    initial_path.nodes.append(block)
+    initial_path.terminating_addr = get_changing_addr(block, register, addr)
+    if initial_path.terminating_addr is not None:
+        return [block], [initial_path.terminating_addr]
+
+    current_paths.append(initial_path)
+    viewed_blocks = [block]
+    terminating_addrs = []
+
+    while current_paths:
+        #print "Current paths = {}".format(current_paths)
+        path = current_paths.pop()
+        #print 'Poped path = {}'.format(path)
+        new_paths = increment_path(path, viewed_blocks)
+        #print "Incremented to {}".format(new_paths)
+        for new_path in new_paths:
+            #print 'Currently processing {}'.format(new_path)
+            new_path.terminating_addr = get_changing_addr(new_path.nodes[-1], register, addr)
+            if new_path.terminating_addr is None:
+                #print 'Not terminating'
+                current_paths.append(new_path)
+            else:
+                #print 'Terminating'
+                terminating_addrs.append(new_path.terminating_addr)
+
+    return viewed_blocks, terminating_addrs
+
+
 def rename_register(register_name, new_name):
-    blocks, terminating_addrs = get_traces(sark.CodeBlock(id_ea=idc.here()), register_name, idc.here())
+    blocks, terminating_addrs = get_traces_fast(sark.CodeBlock(id_ea=idc.here()), register_name, idc.here())
     apply_register_rename(blocks, terminating_addrs, register_name, new_name, idc.here())
 
 
