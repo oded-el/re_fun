@@ -1,7 +1,6 @@
 import sark
 import idaapi
 import idc
-import time
 
 
 def is_instruction_changing(insn, register):
@@ -45,11 +44,8 @@ def apply_register_rename(blocks, terminating_addrs, register_name, new_name, fr
 
 
 class TracePath(object):
-    def __init__(self, nodes=None):
-        self._nodes = []
-        if nodes is not None:
-            self._nodes += nodes
-
+    def __init__(self, node=None):
+        self._node = node
         self._terminating_addr = None
 
     def set_terminating_addr(self, addr):
@@ -58,91 +54,40 @@ class TracePath(object):
     def get_terminating_addr(self):
         return self._terminating_addr
 
-    def get_nodes(self):
-        return self._nodes
+    def get_node(self):
+        return self._node
+
+    def set_node(self, new_node):
+        self._node = new_node
 
     def __repr__(self):
-        representation = "Path[len = {}]".format(len(self.nodes))
-        for block in self.nodes:
-            representation += " -> {}".format(block)
-        return representation
+        return "Path[{}]".format(self.node)
 
     def __str__(self):
         return self.__repr__()
 
-    nodes = property(get_nodes)
+    node = property(get_node, set_node)
     terminating_addr = property(get_terminating_addr, set_terminating_addr)
 
 
-def add_paths(beg_path, next_path):
-    if beg_path.terminating_addr is not None:
-        raise RuntimeError("Can not combine path that is already terminated")
-
-    path = TracePath()
-    path.nodes.append(beg_path.nodes)
-    path.nodes.append(next_path.nodes)
-    path.terminating_addr = next_path.terminating_addr
-    return path
-
-
-def merge_paths(beg_paths, next_paths):
-    merged_paths = []
-    for path in beg_paths:
-        for next_path in next_paths:
-            merged_paths.append(add_paths(path, next_path))
-
-    return merged_paths
-
-
-def get_traces_imp(block, register, blocks_viewed=None, addr=None):
-    # TODO: can we use hex-rays in the future? (idaapi.decompile)
-
-    current_paths = []
-    im_terminating = False
-    if blocks_viewed is None:
-        blocks_viewed = []
-
-    path = TracePath()
-    path.nodes.append(block)
-
-    if is_block_changing(block, register):
-        path.terminating_addr = get_changing_addr(block, register, addr)
-        if path.terminating_addr is not None:
-            im_terminating = True
-    current_paths.append(path)
-
-    blocks_viewed.append(block)
-    if not im_terminating:
-        new_paths = []
-        for next_block in block.next:
-            if next_block in blocks_viewed:
-                continue
-
-            more_paths, more_blocks = get_traces_imp(next_block, register, list(blocks_viewed))
-            new_paths += merge_paths(current_paths, more_paths)
-            blocks_viewed += more_blocks
-        current_paths = new_paths
-
-    return current_paths, blocks_viewed
-
-
-def get_traces(block, register, addr=None):
-    paths, blocks = get_traces_imp(block, register, addr=addr)
-    terminating_addrs = map(lambda path: path.terminating_addr, paths)
-    return (blocks, terminating_addrs)
+def block_in_blocks(block_to_check, blocks):
+    for block in blocks:
+        if block.startEA == block_to_check.startEA and block.endEA == block_to_check.endEA:
+            return True
+    return False
 
 
 def increment_path(path, viewed_blocks):
-    last_block = path.nodes[-1]
+    last_block = path.node
     resulting_paths = []
 
     for block in last_block.next:
-        if block in viewed_blocks:
+        if block_in_blocks(block, viewed_blocks):
             continue
 
         viewed_blocks.append(block)
-        new_path = TracePath(path.nodes)
-        new_path.nodes.append(block)
+        new_path = TracePath()
+        new_path.node = block
         resulting_paths.append(new_path)
 
     return resulting_paths
@@ -151,7 +96,7 @@ def increment_path(path, viewed_blocks):
 def get_traces_fast(block, register, addr=None):
     current_paths = []
     initial_path = TracePath()
-    initial_path.nodes.append(block)
+    initial_path.node = block
     initial_path.terminating_addr = get_changing_addr(block, register, addr)
     if initial_path.terminating_addr is not None:
         return [block], [initial_path.terminating_addr]
@@ -161,19 +106,13 @@ def get_traces_fast(block, register, addr=None):
     terminating_addrs = []
 
     while current_paths:
-        #print "Current paths = {}".format(current_paths)
         path = current_paths.pop()
-        #print 'Poped path = {}'.format(path)
         new_paths = increment_path(path, viewed_blocks)
-        #print "Incremented to {}".format(new_paths)
         for new_path in new_paths:
-            #print 'Currently processing {}'.format(new_path)
-            new_path.terminating_addr = get_changing_addr(new_path.nodes[-1], register, addr)
+            new_path.terminating_addr = get_changing_addr(new_path.node, register, addr)
             if new_path.terminating_addr is None:
-                #print 'Not terminating'
                 current_paths.append(new_path)
             else:
-                #print 'Terminating'
                 terminating_addrs.append(new_path.terminating_addr)
 
     return viewed_blocks, terminating_addrs
