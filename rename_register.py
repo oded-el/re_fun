@@ -19,28 +19,50 @@ def is_block_changing(block, register):
     return any(map(lambda line: is_instruction_changing(line.insn, register), block.lines))
 
 
-def get_changing_addr(block, register, from_addr=None):
-    for line in block.lines:
+def get_changing_addr(block, register, from_addr=None, reverse=False):
+
+    if reverse:
+        lines_iterator = reversed(list(block.lines))
+    else:
+        lines_iterator = block.lines
+
+    for line in lines_iterator:
         insn = line.insn
-        if is_instruction_changing(insn, register) and line.ea > from_addr:
-            return line.ea
+        if is_instruction_changing(insn, register):
+            if (not reverse and line.ea >= from_addr) or (reverse and line.ea <= from_addr):
+                return line.ea
     return None
 
 
-def get_block_rename_range(block, terminating_addrs):
+def get_block_rename_range(block, terminating_addrs, reverse=False):
     for addr in terminating_addrs:
         if block.startEA <= addr < block.endEA:
-            return (block.startEA, addr)
-    return (block.startEA, block.endEA)
+            if reverse:
+                return addr, block.endEA
+            else:
+                return block.startEA, addr
+
+    return block.startEA, block.endEA
 
 
-def apply_register_rename(blocks, terminating_addrs, register_name, new_name, from_addr=None):
+def apply_register_rename(blocks, terminating_addrs, register_name, new_name, from_addr=None, reverse=False):
     for block in blocks:
-        rename_start, rename_end = get_block_rename_range(block, terminating_addrs)
-        if rename_start <= from_addr < rename_end:
-            rename_start = from_addr
+        rename_start, rename_end = get_block_rename_range(block, terminating_addrs, reverse)
+
+        if rename_start < from_addr <= rename_end:
+            if reverse:
+                rename_end = from_addr
+            else:
+                rename_start = from_addr
+
+        if rename_start == rename_end:
+            continue
         ida_func = idaapi.get_func(rename_start)
-        idaapi.add_regvar(ida_func, rename_start, rename_end, register_name, new_name, '')
+        regvar_result = idaapi.add_regvar(ida_func, rename_start, rename_end, register_name, new_name, '')
+
+        # TODO: how do we handle proper duplicate blocks/block already with renamed compared to real invalid name
+        if idaapi.REGVAR_ERROR_OK != regvar_result and idaapi.REGVAR_ERROR_NAME != regvar_result:
+            raise RuntimeError("Failed applying rename to range {}-{}, error={}".format(hex(rename_start), hex(rename_end), regvar_result))
 
 
 class TracePath(object):
@@ -77,11 +99,16 @@ def block_in_blocks(block_to_check, blocks):
     return False
 
 
-def increment_path(path, viewed_blocks):
+def increment_path(path, viewed_blocks, reverse=False):
     last_block = path.node
     resulting_paths = []
 
-    for block in last_block.next:
+    if reverse:
+        next_blocks = last_block.prev
+    else:
+        next_blocks = last_block.next
+
+    for block in next_blocks:
         if block_in_blocks(block, viewed_blocks):
             continue
 
@@ -93,12 +120,12 @@ def increment_path(path, viewed_blocks):
     return resulting_paths
 
 
-def get_traces_fast(block, register, addr=None):
+def get_traces_fast(block, register, addr=None, reverse=False):
     current_paths = []
     initial_path = TracePath()
     initial_path.node = block
-    initial_path.terminating_addr = get_changing_addr(block, register, addr)
-    if initial_path.terminating_addr is not None:
+    initial_path.terminating_addr = get_changing_addr(block, register, addr, reverse)
+    if initial_path.terminating_addr is not None and (initial_path.terminating_addr != addr or reverse):
         return [block], [initial_path.terminating_addr]
 
     current_paths.append(initial_path)
@@ -107,9 +134,9 @@ def get_traces_fast(block, register, addr=None):
 
     while current_paths:
         path = current_paths.pop()
-        new_paths = increment_path(path, viewed_blocks)
+        new_paths = increment_path(path, viewed_blocks, reverse)
         for new_path in new_paths:
-            new_path.terminating_addr = get_changing_addr(new_path.node, register, addr)
+            new_path.terminating_addr = get_changing_addr(new_path.node, register, addr, reverse)
             if new_path.terminating_addr is None:
                 current_paths.append(new_path)
             else:
@@ -120,7 +147,9 @@ def get_traces_fast(block, register, addr=None):
 
 def rename_register(register_name, new_name):
     blocks, terminating_addrs = get_traces_fast(sark.CodeBlock(id_ea=idc.here()), register_name, idc.here())
+    reverse_blocks, reverse_terminating = get_traces_fast(sark.CodeBlock(id_ea=idc.here()), register_name, idc.here(), reverse=True)
     apply_register_rename(blocks, terminating_addrs, register_name, new_name, idc.here())
+    apply_register_rename(reverse_blocks, reverse_terminating, register_name, new_name, idc.here(), reverse=True)
 
 
 class RenameRegisterHandler(idaapi.action_handler_t):
