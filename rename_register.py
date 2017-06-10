@@ -92,13 +92,6 @@ class TracePath(object):
     terminating_addr = property(get_terminating_addr, set_terminating_addr)
 
 
-def block_in_blocks(block_to_check, blocks):
-    for block in blocks:
-        if block.startEA == block_to_check.startEA and block.endEA == block_to_check.endEA:
-            return True
-    return False
-
-
 def increment_path(path, viewed_blocks, reverse=False):
     last_block = path.node
     resulting_paths = []
@@ -109,7 +102,7 @@ def increment_path(path, viewed_blocks, reverse=False):
         next_blocks = last_block.next
 
     for block in next_blocks:
-        if block_in_blocks(block, viewed_blocks):
+        if block in viewed_blocks:
             continue
 
         viewed_blocks.append(block)
