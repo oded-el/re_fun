@@ -1,7 +1,7 @@
 import sark
 import idaapi
 import idc
-import base
+from re_fun import base
 
 
 class BlockRegisterUsage(object):
