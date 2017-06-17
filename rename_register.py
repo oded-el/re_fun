@@ -1,6 +1,84 @@
 import sark
 import idaapi
 import idc
+import base
+
+
+class BlockRegisterUsage(object):
+
+    def __init__(self, block, usage_start=None, usage_end=None):
+        self._block = block
+        if usage_start is None:
+            usage_start = block.startEA
+        if usage_end is None:
+            usage_end = block.endEA
+
+        self._start = usage_start
+        self._end = usage_end
+
+    @property
+    def block(self):
+        return self._block
+
+    @block.setter
+    def block(self, new_block):
+        self._block = new_block
+
+    @property
+    def usage_start(self):
+        return self._start
+
+    @usage_start.setter
+    def usage_start(self, new_start):
+        self._start = new_start
+
+    @property
+    def usage_end(self):
+        return self._end
+
+    @usage_end.setter
+    def usage_end(self, new_end):
+        self._end = new_end
+
+    def __eq__(self, other):
+        return self.block == other.block
+
+    def __repr__(self):
+        return '[{}: {}-{}]'.format(self._block, hex(self._start), hex(self._end))
+
+    def __str__(self):
+        return self.__repr__()
+
+
+class UsagePath(object):
+
+    def __init__(self, start=None):
+        if start is None:
+            start = []
+        else:
+            start = [start]
+
+        self._path = start
+
+    def __iadd__(self, other):
+        self._path = self._path + other.path
+        return self
+
+    def add(self, block):
+        self._path.append(block)
+
+    @property
+    def path(self):
+        return self._path
+
+    def get_last(self):
+        return self._path[-1]
+
+    def __repr__(self):
+        return str(self._path)
+
+    def __str__(self):
+        return self.__repr__()
 
 
 def is_instruction_changing(insn, register):
@@ -15,134 +93,108 @@ def is_instruction_changing(insn, register):
     return False
 
 
-def is_block_changing(block, register):
-    return any(map(lambda line: is_instruction_changing(line.insn, register), block.lines))
-
-
-def get_changing_addr(block, register, from_addr=None, reverse=False):
-
-    if reverse:
-        lines_iterator = reversed(list(block.lines))
-    else:
-        lines_iterator = block.lines
-
-    for line in lines_iterator:
-        insn = line.insn
-        if is_instruction_changing(insn, register):
-            if (not reverse and line.ea >= from_addr) or (reverse and line.ea <= from_addr):
-                return line.ea
-    return None
-
-
-def get_block_rename_range(block, terminating_addrs, reverse=False):
-    for addr in terminating_addrs:
-        if block.startEA <= addr < block.endEA:
-            if reverse:
-                return addr, block.endEA
-            else:
-                return block.startEA, addr
-
-    return block.startEA, block.endEA
-
-
-def apply_register_rename(blocks, terminating_addrs, register_name, new_name, from_addr=None, reverse=False):
-    for block in blocks:
-        rename_start, rename_end = get_block_rename_range(block, terminating_addrs, reverse)
-
-        if rename_start < from_addr <= rename_end:
-            if reverse:
-                rename_end = from_addr
-            else:
-                rename_start = from_addr
-
-        if rename_start == rename_end:
+def apply_register_rename(rename_blocks, register_name, new_name):
+    for rename_block in rename_blocks:
+        if rename_block.usage_start == rename_block.usage_end:
             continue
-        ida_func = idaapi.get_func(rename_start)
-        regvar_result = idaapi.add_regvar(ida_func, rename_start, rename_end, register_name, new_name, '')
+
+        ida_func = idaapi.get_func(rename_block.block.startEA)
+        regvar_result = idaapi.add_regvar(
+            ida_func,
+            rename_block.usage_start,
+            rename_block.usage_end,
+            register_name,
+            new_name,
+            ''
+        )
 
         # TODO: how do we handle proper duplicate blocks/block already with renamed compared to real invalid name
         if idaapi.REGVAR_ERROR_OK != regvar_result and idaapi.REGVAR_ERROR_NAME != regvar_result:
-            raise RuntimeError("Failed applying rename to range {}-{}, error={}".format(hex(rename_start), hex(rename_end), regvar_result))
+            raise RuntimeError("Failed applying rename to range {}-{}, error={}".format(
+                hex(rename_block.usage_start),
+                hex(rename_block.usage_end),
+                regvar_result)
+            )
 
 
-class TracePath(object):
-    def __init__(self, node=None):
-        self._node = node
-        self._terminating_addr = None
+def rename_iteration(path, register_name, viewed_blocks):
+    block_register = path.get_last()
+    viewed_blocks.append(block_register)
 
-    def set_terminating_addr(self, addr):
-        self._terminating_addr = addr
+    def is_relevant_line(line):
+        return block_register.usage_start < line.ea < block_register.usage_end
 
-    def get_terminating_addr(self):
-        return self._terminating_addr
+    is_changing = False
+    for line in filter(is_relevant_line, block_register.block.lines):
+        if is_instruction_changing(line.insn, register_name):
+            is_changing = True
+            block_register.usage_end = line.ea
+            break
 
-    def get_node(self):
-        return self._node
+    if is_changing:
+        return []
 
-    def set_node(self, new_node):
-        self._node = new_node
-
-    def __repr__(self):
-        return "Path[{}]".format(self.node)
-
-    def __str__(self):
-        return self.__repr__()
-
-    node = property(get_node, set_node)
-    terminating_addr = property(get_terminating_addr, set_terminating_addr)
-
-
-def increment_path(path, viewed_blocks, reverse=False):
-    last_block = path.node
-    resulting_paths = []
-
-    if reverse:
-        next_blocks = last_block.prev
-    else:
-        next_blocks = last_block.next
-
-    for block in next_blocks:
-        if block in viewed_blocks:
+    next_paths = []
+    for block in block_register.block.next:
+        usage_block = BlockRegisterUsage(block)
+        if usage_block in viewed_blocks:
             continue
 
-        viewed_blocks.append(block)
-        new_path = TracePath()
-        new_path.node = block
-        resulting_paths.append(new_path)
+        new_path = UsagePath()
+        new_path += path
+        new_path.add(usage_block)
+        next_paths.append(new_path)
 
-    return resulting_paths
+    return next_paths
 
 
-def get_traces_fast(block, register, addr=None, reverse=False):
-    current_paths = []
-    initial_path = TracePath()
-    initial_path.node = block
-    initial_path.terminating_addr = get_changing_addr(block, register, addr, reverse)
-    if initial_path.terminating_addr is not None and (initial_path.terminating_addr != addr or reverse):
-        return [block], [initial_path.terminating_addr]
+def reverse_rename_iteration(path, register_name, viewed_blocks):
+    block_register = path.get_last()
+    viewed_blocks.append(block_register)
 
-    current_paths.append(initial_path)
-    viewed_blocks = [block]
-    terminating_addrs = []
+    def is_relevant_line(line):
+        return block_register.usage_start < line.ea < block_register.usage_end
 
-    while current_paths:
-        path = current_paths.pop()
-        new_paths = increment_path(path, viewed_blocks, reverse)
-        for new_path in new_paths:
-            new_path.terminating_addr = get_changing_addr(new_path.node, register, addr, reverse)
-            if new_path.terminating_addr is None:
-                current_paths.append(new_path)
-            else:
-                terminating_addrs.append(new_path.terminating_addr)
+    is_changing = False
+    for line in reversed(filter(is_relevant_line, block_register.block.lines)):
+        if is_instruction_changing(line.insn, register_name):
+            is_changing = True
+            block_register.usage_start = line.ea
+            break
 
-    return viewed_blocks, terminating_addrs
+    if is_changing:
+        return []
+
+    next_paths = []
+    for block in block_register.block.prev:
+        usage_block = BlockRegisterUsage(block)
+        if usage_block in viewed_blocks:
+            continue
+
+        new_path = UsagePath()
+        new_path += path
+        new_path.add(usage_block)
+        next_paths.append(new_path)
+
+    return next_paths
 
 
 def rename_register(register_name, new_name):
-    blocks, terminating_addrs = get_traces_fast(sark.CodeBlock(id_ea=idc.here()), register_name, idc.here())
-    reverse_blocks, reverse_terminating = get_traces_fast(sark.CodeBlock(id_ea=idc.here()), register_name, idc.here(), reverse=True)
-    apply_register_rename(blocks, terminating_addrs, register_name, new_name, idc.here())
-    apply_register_rename(reverse_blocks, reverse_terminating, register_name, new_name, idc.here(), reverse=True)
+    current_block = UsagePath(BlockRegisterUsage(sark.CodeBlock(idc.here()), usage_start=idc.here()))
+    current_reverse_block = UsagePath(BlockRegisterUsage(sark.CodeBlock(idc.here()), usage_end=idc.here()))
+    viewed_blocks = []
+    backwards_viewed_blocks = []
+    forward_iteration = lambda b: rename_iteration(b, register_name, viewed_blocks)
+    backwards_iteration = lambda b: reverse_rename_iteration(b, register_name, backwards_viewed_blocks)
+
+    traces = base.get_traces(current_block, forward_iteration)
+    reverse_traces = base.get_traces(current_reverse_block, backwards_iteration)
+
+    for trace in traces:
+        apply_register_rename(trace.path, register_name, new_name)
+
+    for reverse_trace in reverse_traces:
+        apply_register_rename(reverse_trace.path, register_name, new_name)
 
 
 class RenameRegisterHandler(idaapi.action_handler_t):
